@@ -1,104 +1,115 @@
-import asyncio  
-from typing import Dict, Any  
-from marzban_client import MarzbanClient  
-from config import LIMIT_IP  
-from logger import logger  
+import py3xui
 
-class MarzbanClientManager:  
-    def __init__(self, marzban_client: MarzbanClient):  
-        self.client = marzban_client  
+from config import LIMIT_IP
+from logger import logger
 
-    async def add_client(  
-        self,  
-        username: str,  
-        email: str,  
-        tg_id: str,  
-        total_gb: int,  
-        expiry_time: int,  
-        service_name: str = 'default'  
-    ) -> Dict[str, Any]:  
-        """  
-        Добавление нового клиента в Marzban  
-        """  
-        try:  
-            # Подготовка данных для создания пользователя  
-            user_data = {  
-                'username': username,  
-                'email': email,  
-                'service': service_name,  
-                'data_limit': total_gb * 1024 * 1024 * 1024,  # Конвертация ГБ в байты  
-                'expire': expiry_time,  
-                'proxies': {  
-                    'vless': {},  
-                    'vmess': {},  
-                    'trojan': {}  
-                },  
-                'status': 'active',  
-                'note': f'Telegram ID: {tg_id}'  
-            }  
 
-            # Создание пользователя  
-            response = await self.client.create_user(user_data)  
-            
-            logger.info(f"Клиент {username} успешно добавлен в Marzban.")  
-            return {"status": "success", "data": response}  
+async def add_client(
+    xui,
+    client_id: str,
+    email: str,
+    tg_id: str,
+    limit_ip: int,
+    total_gb: int,
+    expiry_time: int,
+    enable: bool,
+    flow: str,
+    inbound_id: int,
+):
+    """
+    Adds a client to the server via 3x-ui.
+    """
+    try:
+        await xui.login()
 
-        except Exception as e:  
-            logger.error(f"Ошибка при добавлении клиента {username}: {e}")  
-            return {"status": "failed", "error": str(e)}  
+        client = py3xui.Client(
+            id=client_id,
+            email=email.lower(),
+            limit_ip=limit_ip,
+            total_gb=total_gb,
+            expiry_time=expiry_time,
+            enable=enable,
+            tg_id=tg_id,
+            sub_id=email,
+            flow=flow,
+        )
 
-    async def extend_client(  
-        self,  
-        username: str,  
-        total_gb: int,  
-        expiry_time: int  
-    ) -> Dict[str, Any]:  
-        """  
-        Продление подписки клиента в Marzban  
-        """  
-        try:  
-            # Получение текущих данных пользователя  
-            user = await self.client.get_user(username)  
+        response = await xui.client.add(inbound_id, [client])
 
-            # Подготовка данных для обновления  
-            update_data = {  
-                'data_limit': total_gb * 1024 * 1024 * 1024,  # Конвертация ГБ в байты  
-                'expire': expiry_time,  
-                'status': 'active'  
-            }  
+        logger.info(f"Клиент {email} успешно добавлен с ID {client_id}.")
 
-            # Обновление пользователя  
-            response = await self.client.modify_user(username, update_data)  
-            
-            logger.info(f"Подписка клиента {username} успешно продлена.")  
-            return {"status": "success", "data": response}  
+        return response if response else {"status": "failed"}
 
-        except Exception as e:  
-            logger.error(f"Ошибка при продлении подписки для {username}: {e}")  
-            return {"status": "failed", "error": str(e)}  
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении клиента {email}: {e}")
+        return {"status": "failed", "error": str(e)}
 
-    async def delete_client(self, username: str) -> Dict[str, Any]:  
-        """  
-        Удаление клиента из Marzban  
-        """  
-        try:  
-            # Удаление пользователя  
-            await self.client.delete_user(username)  
-            
-            logger.info(f"Клиент {username} успешно удален из Marzban.")  
-            return {"status": "success"}  
 
-        except Exception as e:  
-            logger.error(f"Ошибка при удалении клиента {username}: {e}")  
-            return {"status": "failed", "error": str(e)}  
+async def extend_client_key(
+    xui, inbound_id, email: str, new_expiry_time: int, client_id: str, total_gb: int
+):
+    """
+    Функция для обновления срока действия ключа клиента по email.
+    """
+    await xui.login()
+    try:
+        client = await xui.client.get_by_email(email)
 
-    async def get_client_info(self, username: str) -> Dict[str, Any]:  
-        """  
-        Получение информации о клиенте  
-        """  
-        try:  
-            user_info = await self.client.get_user(username)  
-            return {"status": "success", "data": user_info}  
-        except Exception as e:  
-            logger.error(f"Ошибка при получении информации о клиенте {username}: {e}")  
-            return {"status": "failed", "error": str(e)}
+        if not client:
+            logger.warning(f"Клиент с email {email} не найден.")
+            return
+
+        if not client.id:
+            logger.warning(f"Ошибка: клиент {email} не имеет действительного ID.")
+            return
+
+        logger.info(
+            f"Обновление ключа клиента {client.email} с ID {client.id} до нового времени: {new_expiry_time}"
+        )
+
+        client.id = client_id
+        client.expiry_time = new_expiry_time
+        client.flow = "xtls-rprx-vision"
+        client.sub_id = email
+        client.total_gb = total_gb
+        client.enable = True
+        client.limit_ip = LIMIT_IP
+        client.inbound_id = inbound_id
+
+        await xui.client.update(client.id, client)
+        await xui.client.reset_stats(inbound_id, email)
+        logger.info(
+            f"Ключ клиента {client.email} успешно продлён до {new_expiry_time}."
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении клиента с email {email}: {e}")
+
+
+async def delete_client(
+    xui,
+    inbound_id: int,
+    email: str,
+    client_id: str,
+) -> bool:
+    """
+    Функция для удаления клиента с сервера 3x-ui.
+    Возвращает True при успешном удалении, иначе False.
+    """
+    await xui.login()
+    try:
+        client = await xui.client.get_by_email(email)
+
+        if not client:
+            logger.warning(f"Клиент с email {email} и ID {client_id} не найден.")
+            return False
+
+        client.id = client_id
+
+        await xui.client.delete(inbound_id, client.id)
+        logger.info(f"Клиент с ID {client_id} был удален успешно.")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении клиента с ID {client_id}: {e}")
+        return False
